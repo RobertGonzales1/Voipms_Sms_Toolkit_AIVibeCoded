@@ -30,22 +30,13 @@ $StaleSeconds = 180
 
 $Proc         = $null
 $StartedByUs  = $false
+$Mutex        = $null
+$HoldsMutex   = $false
 
 
 # --------------------------------------------------------------------------
 # helpers
 # --------------------------------------------------------------------------
-
-function Format-Did {
-    param([string]$Did)
-    if ([string]::IsNullOrWhiteSpace($Did)) { return '' }
-    $digits = ($Did -replace '\D', '')
-    if ($digits.Length -eq 11 -and $digits.StartsWith('1')) { $digits = $digits.Substring(1) }
-    if ($digits.Length -eq 10) {
-        return '({0}) {1}-{2}' -f $digits.Substring(0,3), $digits.Substring(3,3), $digits.Substring(6,4)
-    }
-    return $Did
-}
 
 function Write-Cell {
     param([string]$Text, [int]$Width, [string]$Color = 'Gray')
@@ -71,7 +62,9 @@ function Get-StatusAge {
 }
 
 function Test-ExistingDaemon {
-    # True only if the status file is fresh AND the pid it names is still alive.
+    # True only if the status file is fresh AND the pid it names is still a
+    # python process. Windows recycles PIDs, so a bare id match can point at an
+    # unrelated process and make us refuse to start while showing a stale file.
     $payload = Get-Status
     if ($null -eq $payload) { return $false }
 
@@ -81,6 +74,7 @@ function Test-ExistingDaemon {
     if ($payload.pid) {
         $running = Get-Process -Id $payload.pid -ErrorAction SilentlyContinue
         if (-not $running) { return $false }
+        if ($running.ProcessName -notmatch 'python') { return $false }
     }
     return $true
 }
@@ -138,11 +132,11 @@ function Show-Dashboard {
     Write-Host ('  ' + ('-' * 76)) -ForegroundColor DarkGray
 
     foreach ($acct in $accounts) {
-        $dids = @($acct.dids)
+        # The daemon pre-formats these, so number formatting lives in one place.
         # @(...) is required: PowerShell unwraps a single-element array into a
         # bare string, and indexing a string yields characters, not the number.
         $numbers = @(
-            if ($dids.Count -gt 0) { $dids | ForEach-Object { Format-Did $_ } }
+            if ($acct.display) { $acct.display }
             else { '(no DID set)' }
         )
 
@@ -207,6 +201,25 @@ if (-not $python) { throw 'python was not found on PATH.' }
 # Clear any stop flag left behind by a previous hard kill.
 if (Test-Path $StopFlag) { Remove-Item $StopFlag -Force -ErrorAction SilentlyContinue }
 
+# Serialise the check-then-start below. Without this, two near-simultaneous
+# launches both see no daemon and both start one - registering the same
+# subaccount twice, which is precisely what VoIP.ms warns breaks SMS delivery.
+$Mutex = New-Object System.Threading.Mutex($false, 'Global\VoIPmsSipKeepalive')
+try {
+    $HoldsMutex = $Mutex.WaitOne(5000)
+} catch [System.Threading.AbandonedMutexException] {
+    # A previous holder was killed without releasing; we inherit it cleanly.
+    $HoldsMutex = $true
+}
+
+if (-not $HoldsMutex) {
+    Write-Host ''
+    Write-Host '  Another start.ps1 is launching the daemon right now.' -ForegroundColor Yellow
+    Write-Host '  Wait a moment and run this again.' -ForegroundColor Gray
+    Write-Host ''
+    exit 3
+}
+
 if (Test-ExistingDaemon) {
     Write-Host ''
     Write-Host '  A keepalive daemon is already running.' -ForegroundColor Yellow
@@ -245,6 +258,13 @@ if (Test-ExistingDaemon) {
         Write-Host ''
         exit 3
     }
+}
+
+
+# The check-then-start critical section is over; another window may now attach.
+if ($HoldsMutex) {
+    try { $Mutex.ReleaseMutex() } catch { }
+    $HoldsMutex = $false
 }
 
 

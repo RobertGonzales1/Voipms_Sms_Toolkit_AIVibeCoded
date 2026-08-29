@@ -1,15 +1,20 @@
 {
   "_comment": "Copy to sip_config.json and fill in. These are SUBACCOUNT SIP passwords, NOT your API password and NOT your portal password. Find them under Sub Accounts > Manage Sub Accounts > edit (pencil icon).",
 
+  "_password_note": "PREFERRED: leave 'password' out entirely and set an environment variable instead - VOIPMS_SIP_PASSWORD_<LABEL>, uppercased with non-alphanumerics as underscores. So label 'main-line' reads VOIPMS_SIP_PASSWORD_MAIN_LINE. This folder is typically cloud-synced, and a SIP password permits outbound calling at your expense.",
+
+  "_did_note": "'did' is display-only - it labels the row in the dashboard. Use 'dids': [..] if one subaccount receives for several numbers. Run 'python voipms_watch.py map' to discover which subaccount each number uses.",
+
   "defaults": {
     "server": "chicago.voip.ms",
     "sip_port": 5060,
     "expires": 300,
     "nat_keepalive": 30,
-    "invite_response": "480 Temporarily Unavailable"
-  },
+    "invite_response": "480 Temporarily Unavailable",
 
-  "_did_note": "'did' is display-only - it labels the row in the dashboard. Use 'dids': [..] if one subaccount receives for several numbers. Run 'python voipms_watch.py map' to discover which subaccount each number uses.",
+    "_log_message_bodies": "Off by default. Inbound texts are 2FA codes and password resets more often than not, and SIP is unencrypted. With this off, sip_messages.log still records sender and timestamp - enough to prove a message reached VoIP.ms - without keeping the secret on disk.",
+    "log_message_bodies": false
+  },
 
   "accounts": [
     {
@@ -22,7 +27,6 @@
       "label": "business",
       "dids": ["5559876543", "5552223333"],
       "account": "123456_biz",
-      "password": "SUBACCOUNT_SIP_PASSWORD",
       "server": "toronto.voip.ms"
     }
   ]

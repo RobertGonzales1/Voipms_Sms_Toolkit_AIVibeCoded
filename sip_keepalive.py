@@ -35,6 +35,7 @@ import hashlib
 import json
 import os
 import random
+import re
 import secrets
 import select
 import socket
@@ -61,6 +62,10 @@ DEFAULT_EXPIRES = 300
 DEFAULT_NAT_KEEPALIVE = 30
 DEFAULT_SIP_PORT = 5060
 
+# Logs are append-only and this daemon runs forever, so cap them. One previous
+# generation is kept as <name>.1.
+MAX_LOG_BYTES = 2 * 1024 * 1024
+
 _log_lock = threading.Lock()
 _shutdown = threading.Event()
 
@@ -69,6 +74,16 @@ _shutdown = threading.Event()
 # logging
 # --------------------------------------------------------------------------
 
+def _rotate_if_needed(path: str) -> None:
+    """Caller must hold _log_lock."""
+    try:
+        if os.path.getsize(path) < MAX_LOG_BYTES:
+            return
+        os.replace(path, path + ".1")
+    except OSError:
+        pass
+
+
 def log(message: str, *, path: str = LOG_PATH, echo: bool = True) -> None:
     stamp = dt.datetime.now().replace(microsecond=0).isoformat()
     line = f"{stamp}  {message}"
@@ -76,10 +91,30 @@ def log(message: str, *, path: str = LOG_PATH, echo: bool = True) -> None:
         print(line, flush=True)
     with _log_lock:
         try:
+            _rotate_if_needed(path)
             with open(path, "a", encoding="utf-8") as fh:
                 fh.write(line + "\n")
         except OSError:
             pass
+
+
+def resolve_password(entry: dict) -> str:
+    """Password from the environment first, then the config file.
+
+    Env vars keep the SIP password out of sip_config.json, which matters because
+    this folder is typically inside a cloud-synced directory. A SIP password
+    permits outbound calling at the account owner's expense, so it is the more
+    sensitive of the two credentials this toolkit handles.
+    """
+    def env_key(value: str) -> str:
+        return "VOIPMS_SIP_PASSWORD_" + re.sub(r"[^A-Za-z0-9]", "_", str(value)).upper()
+
+    for candidate in (entry.get("label"), entry.get("account")):
+        if candidate:
+            value = os.environ.get(env_key(candidate))
+            if value:
+                return value
+    return str(entry.get("password") or "")
 
 
 # --------------------------------------------------------------------------
@@ -215,7 +250,7 @@ class SipAccount:
 
     def __init__(self, entry: dict, defaults: dict):
         self.username = str(entry["account"]).strip()
-        self.password = str(entry["password"])
+        self.password = resolve_password(entry)
         self.server = str(entry.get("server") or defaults.get("server", "")).strip()
         self.label = str(entry.get("label") or self.username)
         self.port = int(entry.get("sip_port") or defaults.get("sip_port", DEFAULT_SIP_PORT))
@@ -227,6 +262,10 @@ class SipAccount:
             entry.get("invite_response") or defaults.get("invite_response", "480 Temporarily Unavailable")
         )
         self.verbose = bool(defaults.get("verbose"))
+        # Message bodies are 2FA codes and password resets more often than not.
+        # Off by default: sender + timestamp alone still proves whether a message
+        # reached VoIP.ms, without retaining the secret.
+        self.log_bodies = bool(defaults.get("log_message_bodies", False))
 
         # Phone number(s) this subaccount receives SMS for. Display only - accepts
         # a single "did" string or a "dids" list.
@@ -247,6 +286,8 @@ class SipAccount:
         self.from_tag = new_tag()
         self.cseq = 0
         self.nonce_count = 0
+        # What the server actually granted, which can be less than we asked for.
+        self.granted_expires = self.expires
 
         # shared with the status writer
         self.lock = threading.Lock()
@@ -258,8 +299,12 @@ class SipAccount:
 
     # -- plumbing ---------------------------------------------------------
 
-    def open_socket(self) -> None:
+    def resolve_server(self) -> None:
+        """Re-resolve the POP each cycle so a rotated IP is picked up."""
         self.server_addr = (socket.gethostbyname(self.server), self.port)
+
+    def open_socket(self) -> None:
+        self.resolve_server()
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind(("0.0.0.0", 0))
         # Learn which local address routes to this POP.
@@ -278,6 +323,21 @@ class SipAccount:
             except OSError:
                 pass
             self.sock = None
+
+    def from_server(self, addr) -> bool:
+        """Reject datagrams that did not come from our POP.
+
+        Without this, anything that reaches this ephemeral port is parsed and
+        acted on: a forged MESSAGE would be answered 200 OK, counted, and logged
+        as a genuine SMS. It also keeps stray traffic away from the parser.
+        """
+        if not self.server_addr or not addr:
+            return False
+        if addr[0] != self.server_addr[0]:
+            if self.verbose:
+                log(f"[{self.label}] dropped packet from {addr[0]}", echo=False)
+            return False
+        return True
 
     def send(self, message: str) -> None:
         if self.verbose:
@@ -339,7 +399,9 @@ class SipAccount:
             if not ready:
                 continue
 
-            data, _ = self.sock.recvfrom(65535)
+            data, addr = self.sock.recvfrom(65535)
+            if not self.from_server(addr):
+                continue
             text = data.decode("utf-8", errors="replace")
             if self.verbose:
                 log(f"[{self.label}] <<<\n{text}", echo=False)
@@ -367,6 +429,8 @@ class SipAccount:
 
             if 200 <= msg["status"] < 300:
                 granted = self.granted_expiry(msg, expires)
+                # Refresh scheduling keys off this, not off what we requested.
+                self.granted_expires = granted if expires > 0 else expires
                 with self.lock:
                     self.registered = expires > 0
                     self.last_ok = time.time()
@@ -386,16 +450,18 @@ class SipAccount:
         return False
 
     def granted_expiry(self, msg: dict, requested: int) -> int:
-        """Honour whatever the server actually granted, not what we asked for."""
+        """Honour whatever the server actually granted, not what we asked for.
+
+        Only the leading digit run after 'expires=' belongs to the value. Taking
+        every digit in the tail would swallow following parameters, so
+        ';expires=60;received=1.2.3.4' would read as 601234 seconds and the
+        registration would silently lapse long before we refreshed it.
+        """
         contact = msg["headers"].get("contact", "")
-        if "expires=" in contact.lower():
-            try:
-                tail = contact.lower().split("expires=", 1)[1]
-                digits = "".join(c for c in tail if c.isdigit())
-                if digits:
-                    return int(digits)
-            except (ValueError, IndexError):
-                pass
+        match = re.search(r"expires\s*=\s*(\d+)", contact, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+
         header = msg["headers"].get("expires")
         if header and header.strip().isdigit():
             return int(header.strip())
@@ -421,7 +487,8 @@ class SipAccount:
             with self.lock:
                 self.messages_received += 1
             log(f"[{self.label}] SMS accepted from {sender}")
-            log(f"{self.label}\t{sender}\t{body}", path=SMS_LOG_PATH, echo=False)
+            record = body if self.log_bodies else f"<{len(body)} chars, body logging off>"
+            log(f"{self.label}\t{sender}\t{record}", path=SMS_LOG_PATH, echo=False)
 
         elif method == "OPTIONS":
             self.send(self.build_response(msg, "200 OK"))
@@ -448,6 +515,8 @@ class SipAccount:
                     self.open_socket()
                     log(f"[{self.label}] socket {self.local_ip}:{self.local_port} -> "
                         f"{self.server} ({self.server_addr[0]})")
+                else:
+                    self.resolve_server()
 
                 if not self.do_register(self.expires):
                     self.close_socket()
@@ -456,7 +525,7 @@ class SipAccount:
                     continue
 
                 backoff = 5
-                log(f"[{self.label}] registered (expires in {self.expires}s)")
+                log(f"[{self.label}] registered (expires in {self.granted_expires}s)")
                 self.service_registration()
 
             except (OSError, socket.gaierror) as exc:
@@ -465,13 +534,33 @@ class SipAccount:
                 _shutdown.wait(backoff)
                 backoff = min(backoff * 2, 300)
 
+            except Exception as exc:  # noqa: BLE001 - see below
+                # Anything unexpected must NOT kill this thread. If it did, the
+                # account would stop re-registering while snapshot() kept
+                # reporting the last known 'registered' state - the dashboard
+                # would show green while inbound SMS was being rejected.
+                self.set_error(f"unexpected: {type(exc).__name__}: {exc}")
+                self.close_socket()
+                _shutdown.wait(backoff)
+                backoff = min(backoff * 2, 300)
+
         self.deregister()
         self.close_socket()
 
+    def mark_thread_dead(self) -> None:
+        """Called by the supervisor if this account's worker is gone."""
+        with self.lock:
+            self.registered = False
+            self.registered_until = 0.0
+            self.last_error = "worker thread died - registration is not being renewed"
+
     def service_registration(self) -> None:
         """Answer traffic and keep NAT open until it is time to re-register."""
-        # Refresh early so a lost packet does not cost us the registration.
-        refresh_at = time.monotonic() + max(30, int(self.expires * 0.6))
+        # Refresh early so a lost packet does not cost us the registration, and
+        # key off what the server granted - it may have given us less than we
+        # asked for, in which case refreshing on our own figure lapses first.
+        lifetime = max(30, int(self.granted_expires * 0.6))
+        refresh_at = time.monotonic() + lifetime
         next_ping = time.monotonic() + self.nat_interval
 
         while not _shutdown.is_set():
@@ -487,9 +576,11 @@ class SipAccount:
 
             if ready:
                 try:
-                    data, _ = self.sock.recvfrom(65535)
+                    data, addr = self.sock.recvfrom(65535)
                 except OSError:
                     return
+                if not self.from_server(addr):
+                    continue
                 text = data.decode("utf-8", errors="replace")
                 if self.verbose:
                     log(f"[{self.label}] <<<\n{text}", echo=False)
@@ -530,6 +621,10 @@ class SipAccount:
                 # between status writes instead of seeing it jump.
                 "expires_at": dt.datetime.fromtimestamp(self.registered_until).isoformat(timespec="seconds")
                               if self.registered_until else None,
+                # Pre-formatted here so number formatting has one implementation
+                # rather than one per viewer. A list, so a viewer can lay several
+                # numbers out across rows if it wants to.
+                "display": [format_did(d) for d in self.dids] or ["(no DID set)"],
                 "messages_received": self.messages_received,
                 "last_error": self.last_error,
             }
@@ -550,6 +645,13 @@ def load_config() -> dict:
         cfg = json.load(fh)
     if not cfg.get("accounts"):
         raise RuntimeError("sip_config.json has no 'accounts' entries")
+
+    # A SIP password in a cloud-synced folder is a password uploaded to a third
+    # party. Warn rather than refuse - the env-var path is right there.
+    if "onedrive" in CONFIG_PATH.lower() or "dropbox" in CONFIG_PATH.lower():
+        if any(entry.get("password") for entry in cfg["accounts"]):
+            log("WARNING: sip_config.json holds passwords and sits in a cloud-synced "
+                "folder. Prefer VOIPMS_SIP_PASSWORD_<LABEL> environment variables.")
     return cfg
 
 
@@ -596,7 +698,7 @@ def cmd_status() -> int:
     print("-" * 72)
     bad = 0
     for acct in payload.get("accounts", []):
-        numbers = ", ".join(format_did(d) for d in acct.get("dids") or []) or acct["account"]
+        numbers = ", ".join(acct.get("display") or []) or acct["account"]
         if acct["registered"]:
             print(f"[ok] {numbers:<20} {acct['label']:<14} registered, renews in "
                   f"{acct['seconds_until_expiry']}s  msgs={acct['messages_received']}")
@@ -664,6 +766,17 @@ def cmd_run(cfg: dict, verbose: bool) -> int:
 
     try:
         while not _shutdown.is_set():
+            # A worker that has died stops renewing its registration, but its
+            # last snapshot would keep reporting 'registered'. Catch that here so
+            # the status file cannot show green for an account nobody is serving.
+            for acct, thread in zip(accounts, threads):
+                if not thread.is_alive():
+                    with acct.lock:
+                        already = acct.last_error == "worker thread died - registration is not being renewed"
+                    if not already:
+                        log(f"[{acct.label}] worker thread is gone - marking unregistered")
+                    acct.mark_thread_dead()
+
             snapshots = [acct.snapshot() for acct in accounts]
             signature = json.dumps([
                 [s["registered"], s["messages_received"], s["last_error"], s["expires_at"]]

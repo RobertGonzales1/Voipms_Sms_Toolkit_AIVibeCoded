@@ -46,8 +46,22 @@ KEEPALIVE_STALE_SECONDS = 180
 # VoIP.ms enforces >= 60s between setSMS enable/disable calls on the same DID.
 SETSMS_COOLDOWN_SECONDS = 61
 
-# SMS settings we track for drift. Maps the getDIDsInfo field -> setSMS param.
-SMS_FIELDS = {
+# getDIDsInfo fields watched for drift. Adding one here changes what 'check'
+# reports, and nothing else.
+MONITORED_FIELDS = (
+    "sms_enabled",
+    "sms_email_enabled",
+    "sms_email",
+    "sms_forward_enabled",
+    "sms_forward",
+    "sms_url_callback_enabled",
+    "sms_url_callback",
+)
+
+# getDIDsInfo field -> setSMS parameter, used only when writing settings back.
+# Kept separate from MONITORED_FIELDS so that widening what we *watch* does not
+# silently widen what 'repair' *overwrites*.
+SETSMS_PARAM_MAP = {
     "sms_enabled": "enable",
     "sms_email_enabled": "email_enabled",
     "sms_email": "email_address",
@@ -161,7 +175,7 @@ def fetch_dids(cfg: dict) -> dict:
         number = str(entry.get("did", "")).strip()
         if not number:
             continue
-        dids[number] = {field: str(entry.get(field, "")) for field in SMS_FIELDS}
+        dids[number] = {field: str(entry.get(field, "")) for field in MONITORED_FIELDS}
         dids[number]["sms_available"] = str(entry.get("sms_available", ""))
         dids[number]["description"] = str(entry.get("description", ""))
     return dids
@@ -231,7 +245,7 @@ def compare_to_baseline(live: dict, baseline: dict) -> list:
             alerts.append((CRITICAL, f"DID {did} is in the baseline but NOT on the account any more"))
             continue
 
-        for field in SMS_FIELDS:
+        for field in MONITORED_FIELDS:
             want, got = expected.get(field, ""), actual.get(field, "")
             if want == got:
                 continue
@@ -378,23 +392,30 @@ def run_repair(cfg: dict, baseline: dict, dry_run: bool) -> list:
     results = []
     drifted = [
         did for did, expected in baseline.items()
-        if did in live and any(expected.get(f, "") != live[did].get(f, "") for f in SMS_FIELDS)
+        if did in live and any(expected.get(f, "") != live[did].get(f, "") for f in MONITORED_FIELDS)
     ]
 
     if not drifted:
         results.append((INFO, "No drift - nothing to repair"))
         return results
 
-    for index, did in enumerate(drifted):
+    # The VoIP.ms cooldown applies per DID, not globally, so consecutive calls
+    # against *different* numbers need no wait at all. Sleeping between every
+    # DID turned a few seconds of API calls into ~1 minute per number.
+    last_call_at = {}
+
+    for did in drifted:
         expected = baseline[did]
-        params = {param: expected.get(field, "") for field, param in SMS_FIELDS.items()}
+        params = {param: expected.get(field, "") for field, param in SETSMS_PARAM_MAP.items()}
 
         if dry_run:
             results.append((INFO, f"[dry-run] would call setSMS for DID {did} with {params}"))
             continue
 
-        if index > 0:
-            time.sleep(SETSMS_COOLDOWN_SECONDS)  # respect the per-DID setSMS cooldown
+        since = time.monotonic() - last_call_at.get(did, float("-inf"))
+        if since < SETSMS_COOLDOWN_SECONDS:
+            time.sleep(SETSMS_COOLDOWN_SECONDS - since)
+        last_call_at[did] = time.monotonic()
 
         try:
             api(cfg, "setSMS", did=did, **params)
@@ -404,7 +425,7 @@ def run_repair(cfg: dict, baseline: dict, dry_run: bool) -> list:
 
         # Verify rather than trust: re-read and confirm the values actually took.
         verify = fetch_dids(cfg).get(did, {})
-        still_wrong = [f for f in SMS_FIELDS if expected.get(f, "") != verify.get(f, "")]
+        still_wrong = [f for f in MONITORED_FIELDS if expected.get(f, "") != verify.get(f, "")]
         if still_wrong:
             results.append((
                 CRITICAL,
@@ -491,7 +512,7 @@ def cmd_baseline(cfg: dict) -> int:
     if not live:
         raise VoipmsError("getDIDsInfo returned no DIDs - refusing to write an empty baseline")
 
-    snapshot = {did: {f: info.get(f, "") for f in SMS_FIELDS} for did, info in live.items()}
+    snapshot = {did: {f: info.get(f, "") for f in MONITORED_FIELDS} for did, info in live.items()}
     with open(BASELINE_PATH, "w", encoding="utf-8") as fh:
         json.dump(snapshot, fh, indent=2, sort_keys=True)
 

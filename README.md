@@ -73,6 +73,20 @@ For each subaccount you need:
 - **`server`** — your POP, e.g. `chicago.voip.ms`. Use the one closest to you;
   it is shown on each subaccount's page.
 
+**Prefer environment variables for the passwords.** A SIP password permits
+outbound calling at your expense, and this folder is cloud-synced — `.gitignore`
+keeps `sip_config.json` out of the repo but not out of OneDrive. Set
+`VOIPMS_SIP_PASSWORD_<LABEL>` (uppercased, non-alphanumerics as underscores, so
+label `main-line` reads `VOIPMS_SIP_PASSWORD_MAIN_LINE`) and omit `password`
+entirely:
+
+```bash
+powershell -Command "[Environment]::SetEnvironmentVariable('VOIPMS_SIP_PASSWORD_MAIN_LINE','your-sip-password','User')"
+```
+
+The daemon warns at startup if it finds passwords in a config file inside a
+synced folder.
+
 - **`did`** — the phone number this subaccount receives for. Display only: it
   labels the row in the dashboard. Use `"dids": ["...", "..."]` if one subaccount
   covers several numbers.
@@ -192,12 +206,18 @@ python sip_keepalive.py --status
 
 | File | |
 | --- | --- |
-| `sip_status.json` | Current per-account state, rewritten every 15s |
-| `sip_keepalive.log` | Registration events and errors |
-| `sip_messages.log` | Every inbound SMS the daemon accepted, with sender and body |
+| `sip_status.json` | Current per-account state; written on change, plus a 15s heartbeat |
+| `sip_keepalive.log` | Registration events and errors; rotates at 2 MB |
+| `sip_messages.log` | Sender and timestamp for every inbound SMS accepted |
 
-`sip_messages.log` is a useful backstop: if a text is in there but never reached
-your phone, the problem is downstream of VoIP.ms, not registration.
+`sip_messages.log` is a useful backstop: if a text is recorded there but never
+reached your phone, the problem is downstream of VoIP.ms, not registration.
+
+**Message bodies are not logged by default.** Most of what arrives on these
+numbers is 2FA codes and password resets, and this folder syncs to the cloud.
+Sender and timestamp are enough to answer "did it reach VoIP.ms?" without keeping
+the secret on disk. Set `"log_message_bodies": true` under `defaults` if you
+need the text for debugging.
 
 ### This machine has to stay on
 
@@ -275,6 +295,19 @@ cell-number hop and read those messages from email, the VoIP.ms portal, or
 Check `sip_messages.log` first — it tells you which side of the line the message
 died on.
 
+## Known limitations
+
+- **No transport security.** SIP runs over plain UDP here. Digest auth protects
+  the *password*, not the *message*, so inbound SMS bodies cross the internet in
+  cleartext. VoIP.ms offers TLS on some POPs; supporting it would mean TCP framing
+  and certificate validation, and is not implemented.
+- **A hard kill orphans the daemon.** Ctrl+C shuts it down cleanly, but
+  `taskkill /F` or killing the PowerShell job skips that path and leaves the
+  Python process running. Recover with `python sip_keepalive.py --status` to find
+  the pid, then stop it — or just create the `sip_stop.flag` file, which the
+  daemon polls once a second.
+- **The machine has to stay awake.** See above.
+
 ## Tests
 
 ```bash
@@ -285,8 +318,15 @@ python test_sip.py
 python test_logic.py
 ```
 
-Both run fully offline. `test_sip.py` stands up a fake SIP registrar on localhost
-and exercises the real digest handshake, including the RFC 2617 reference vector.
+Both are `unittest` suites (stdlib, no dependencies) and run fully offline —
+`test_sip.py` binds only to `127.0.0.1`. It stands up a fake SIP registrar and
+exercises the real digest handshake, including the RFC 2617 reference vector.
+
+Run one class while working on it:
+
+```bash
+python -m unittest test_sip.ExpiryTests -v
+```
 
 ## Repository
 
