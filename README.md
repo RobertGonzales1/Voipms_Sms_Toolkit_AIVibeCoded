@@ -1,12 +1,21 @@
 # VoIP.ms SMS Toolkit
 
-Three programs that work together:
+One script to run:
 
-1. **`sip_keepalive.py`** — holds your subaccounts continuously SIP-registered so
-   VoIP.ms accepts inbound SMS. This is the one that fixes the rejections.
-2. **`dashboard.ps1`** — live, colour-coded registration status for every number.
-3. **`voipms_watch.py`** — watches everything else that can silently break
-   delivery (balance, per-DID SMS settings, registration status).
+```bash
+powershell -ExecutionPolicy Bypass -File ".\start.ps1"
+```
+
+That starts the keepalive service **and** shows live registration status for every
+number in the same window. Ctrl+C stops the service cleanly.
+
+Underneath:
+
+- **`start.ps1`** — the only thing you run. Owns the daemon and the display.
+- **`sip_keepalive.py`** — the service itself: holds subaccounts SIP-registered so
+  VoIP.ms accepts inbound SMS. This is what fixes the rejections.
+- **`voipms_watch.py`** — optional. Checks the non-SIP failure modes (balance,
+  per-DID SMS settings drift).
 
 Stdlib Python only. No `pip install`.
 
@@ -117,7 +126,10 @@ python sip_keepalive.py
 
 Leave it running. Registration lasts only as long as something refreshes it.
 
-### Run it permanently
+### Run it permanently, with no window
+
+Optional. If you would rather not keep a window open, install it as a Scheduled
+Task instead:
 
 ```bash
 powershell -ExecutionPolicy Bypass -File .\install-keepalive-task.ps1
@@ -127,16 +139,13 @@ Starts at logon, restarts automatically if it dies, no time limit, keeps running
 on battery. Add `-AtStartup` to trigger at boot instead of logon — that needs the
 task to run as SYSTEM or with stored credentials, since no one is signed in yet.
 
-```bash
-powershell -Command "Start-ScheduledTask -TaskName 'VoIPms SIP Keepalive'"
-```
+You can still run `start.ps1` any time to watch it; it will attach to the task's
+daemon rather than starting a competing one.
 
-### The dashboard
-
-A live view of every number and whether it is currently registered:
+### Run it
 
 ```bash
-powershell -ExecutionPolicy Bypass -File ".\dashboard.ps1"
+powershell -ExecutionPolicy Bypass -File ".\start.ps1"
 ```
 
 ```
@@ -152,19 +161,28 @@ powershell -ExecutionPolicy Bypass -File ".\dashboard.ps1"
   (555) 444-5555    alerts        123456_alerts     NOT REGISTERED  --      0
       authentication rejected (403) - check the subaccount password
   ============================================================================
-  3 of 4 registered                                          Ctrl+C to exit
+  3 of 4 registered                       Ctrl+C to stop the daemon and exit
 ```
 
 Green means registered, red means not, and a failing account prints its reason
-underneath. The top line tracks the daemon itself — if it stops writing status,
-that flips to a red **STOPPED**, which is what you want to see when registrations
-are quietly expiring.
+underneath. The `daemon:` line tracks the service itself — it turns red if the
+process dies or stops writing status, which is exactly the state where your
+registrations are quietly expiring.
 
-It refreshes every 2 seconds; use `-RefreshSeconds 5` to slow it down or `-Once`
-for a single snapshot. It reads `sip_status.json`, so it works whether the daemon
-is in a console or running hidden as a Scheduled Task.
+Ctrl+C asks the service to shut down cleanly so each subaccount deregisters,
+rather than leaving stale registrations to time out. Refresh rate is
+`-RefreshSeconds 5` if you want it calmer.
 
-For a plain one-shot check without PowerShell:
+**Leave this window open.** Registrations last only as long as the service runs.
+
+### If a service is already running
+
+`start.ps1` checks first. If it finds a live daemon — for example the Scheduled
+Task below — it attaches and displays only, and does not start a second one or
+stop the existing one when you close it. That matters: registering the same
+subaccount twice is what VoIP.ms warns breaks SMS delivery.
+
+For a plain one-shot check with no window:
 
 ```bash
 python sip_keepalive.py --status

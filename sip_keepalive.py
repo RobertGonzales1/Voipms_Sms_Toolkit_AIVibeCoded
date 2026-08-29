@@ -48,6 +48,9 @@ CONFIG_PATH = os.path.join(HERE, "sip_config.json")
 STATUS_PATH = os.path.join(HERE, "sip_status.json")
 LOG_PATH = os.path.join(HERE, "sip_keepalive.log")
 SMS_LOG_PATH = os.path.join(HERE, "sip_messages.log")
+# Touching this file asks the daemon to shut down cleanly (and deregister).
+# Windows has no practical way to send Ctrl+C to a background child process.
+STOP_FLAG_PATH = os.path.join(HERE, "sip_stop.flag")
 
 CRLF = "\r\n"
 USER_AGENT = "voipms-keepalive/1.0"
@@ -476,7 +479,10 @@ class SipAccount:
             if now >= refresh_at:
                 return
 
-            timeout = max(0.5, min(refresh_at, next_ping) - now)
+            # Wake at least once a second so a shutdown request is noticed
+            # promptly. Sleeping all the way to next_ping (up to nat_keepalive
+            # seconds) would delay deregistration past the caller's patience.
+            timeout = min(1.0, max(0.1, min(refresh_at, next_ping) - now))
             ready, _, _ = select.select([self.sock], [], [], timeout)
 
             if ready:
@@ -520,6 +526,10 @@ class SipAccount:
                            if self.last_ok else None,
                 "seconds_until_expiry": max(0, int(self.registered_until - time.time()))
                                         if self.registered_until else 0,
+                # Absolute deadline too, so a viewer can count down smoothly
+                # between status writes instead of seeing it jump.
+                "expires_at": dt.datetime.fromtimestamp(self.registered_until).isoformat(timespec="seconds")
+                              if self.registered_until else None,
                 "messages_received": self.messages_received,
                 "last_error": self.last_error,
             }
@@ -638,10 +648,41 @@ def cmd_run(cfg: dict, verbose: bool) -> int:
     for thread in threads:
         thread.start()
 
+    # A stale flag from a previous hard kill would stop us instantly.
+    if os.path.exists(STOP_FLAG_PATH):
+        try:
+            os.remove(STOP_FLAG_PATH)
+        except OSError:
+            pass
+
+    # Write whenever the state actually changes, plus a heartbeat every 15s.
+    # Polling on a fixed interval alone would leave a viewer showing stale
+    # "not registered" for up to 15s right after startup; writing every second
+    # instead would churn this folder's OneDrive sync for no benefit.
+    last_signature = None
+    last_write = 0.0
+
     try:
         while not _shutdown.is_set():
-            write_status(accounts)
-            _shutdown.wait(15)
+            snapshots = [acct.snapshot() for acct in accounts]
+            signature = json.dumps([
+                [s["registered"], s["messages_received"], s["last_error"], s["expires_at"]]
+                for s in snapshots
+            ])
+            now = time.time()
+            if signature != last_signature or now - last_write >= 15:
+                write_status(accounts)
+                last_signature, last_write = signature, now
+
+            if os.path.exists(STOP_FLAG_PATH):
+                log("stop requested - shutting down")
+                try:
+                    os.remove(STOP_FLAG_PATH)
+                except OSError:
+                    pass
+                _shutdown.set()
+                break
+            _shutdown.wait(1)
     except KeyboardInterrupt:
         pass
     finally:

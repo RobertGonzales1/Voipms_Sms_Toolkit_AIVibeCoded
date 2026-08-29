@@ -8,3 +8,6 @@ sip_config.json
 sip_status.json
 sip_keepalive.log
 sip_messages.log
+sip_stop.flag
+sip_stdout.log
+sip_stderr.log
