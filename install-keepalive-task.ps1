@@ -48,6 +48,28 @@ $trigger = if ($AtStartup) {
     New-ScheduledTaskTrigger -AtLogOn
 }
 
+# A boot trigger is useless under the interactive user - the task would sit
+# waiting for a logon that never comes on an unattended box. Run it as SYSTEM.
+if ($AtStartup) {
+    if ($pythonw -like "$env:USERPROFILE*" -or $pythonw -like '*\Users\*') {
+        Write-Warning "Python is installed per-user ($pythonw)."
+        Write-Warning 'SYSTEM cannot reach it. Reinstall Python for all users, or use logon mode instead.'
+    }
+    if (-not (Test-Path (Join-Path $Here 'sip_config.json'))) {
+        throw 'sip_config.json is required before installing.'
+    }
+    # SYSTEM does not see User-scoped environment variables, so passwords must
+    # be reachable another way.
+    $cfg = Get-Content -Raw (Join-Path $Here 'sip_config.json') | ConvertFrom-Json
+    $missingPasswords = @($cfg.accounts | Where-Object { -not $_.password })
+    if ($missingPasswords.Count -gt 0) {
+        Write-Warning 'Some accounts have no password in sip_config.json, so they rely on'
+        Write-Warning 'VOIPMS_SIP_PASSWORD_* environment variables. Running as SYSTEM, only'
+        Write-Warning "MACHINE-scoped variables are visible. Set them with:"
+        Write-Warning "  [Environment]::SetEnvironmentVariable('VOIPMS_SIP_PASSWORD_LABEL','pw','Machine')"
+    }
+}
+
 # ExecutionTimeLimit 0 = never kill it. RestartCount keeps it alive across crashes.
 $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
@@ -62,14 +84,21 @@ $settings.DisallowStartIfOnBatteries = $false
 $settings.StopIfGoingOnBatteries     = $false
 $settings.IdleSettings.StopOnIdleEnd = $false
 
-Register-ScheduledTask `
-    -TaskName $TaskName `
-    -Action $action `
-    -Trigger $trigger `
-    -Settings $settings `
-    -Description 'Keeps VoIP.ms subaccounts SIP-registered so inbound SMS is accepted.' `
-    -Force | Out-Null
+$register = @{
+    TaskName    = $TaskName
+    Action      = $action
+    Trigger     = $trigger
+    Settings    = $settings
+    Description = 'Keeps VoIP.ms subaccounts SIP-registered so inbound SMS is accepted.'
+    Force       = $true
+}
+if ($AtStartup) {
+    $register.User     = 'SYSTEM'
+    $register.RunLevel = 'Highest'
+}
 
-Write-Host "Registered '$TaskName'."
+Register-ScheduledTask @register | Out-Null
+
+Write-Host "Registered '$TaskName'$(if ($AtStartup) { ' (runs as SYSTEM at boot)' } else { ' (runs at logon)' })."
 Write-Host "Start it now with:  Start-ScheduledTask -TaskName '$TaskName'"
 Write-Host "Then check with:    python sip_keepalive.py --status"

@@ -72,9 +72,11 @@ copy sip_config.example.json sip_config.json
 }
 ```
 
-**Prefer environment variables for the passwords.** A SIP password permits
-outbound calling at your expense, and this folder is cloud-synced — `.gitignore`
-keeps `sip_config.json` out of the repo but not out of OneDrive. Set
+**Consider environment variables for the passwords.** A SIP password permits
+outbound calling at your expense. `.gitignore` keeps `sip_config.json` out of the
+repo, but if the folder sits in OneDrive or Dropbox the file still syncs to the
+provider — the daemon warns at startup when it detects that. On a machine with no
+cloud sync (a VM, say) a local config file is a perfectly reasonable choice. Set
 `VOIPMS_SIP_PASSWORD_<LABEL>` (uppercased, non-alphanumerics as underscores, so
 label `main-line` reads `VOIPMS_SIP_PASSWORD_MAIN_LINE`) and omit `password`:
 
@@ -129,6 +131,104 @@ Ctrl+C shuts down cleanly so each subaccount deregisters. `-RefreshSeconds 5` if
 you want it calmer.
 
 **Leave the window open.** Registrations last only as long as the service runs.
+
+---
+
+## Deploying to another machine
+
+A VM is a better host than a desktop: it does not sleep, and registrations only
+hold while the service runs.
+
+> **Run it in exactly one place.** Two hosts registering the same subaccount will
+> fight over it, which is the double-registration VoIP.ms warns breaks SMS
+> delivery. Before starting it somewhere new, stop it wherever it was:
+> `powershell -File .\install-keepalive-task.ps1 -Uninstall`
+
+### 1. Install Python
+
+Get Python 3.8+ from python.org. Two boxes matter on the installer:
+
+- **Add python.exe to PATH**
+- **Install for all users** — required if you intend to run at boot as SYSTEM,
+  because SYSTEM cannot reach a per-user install. The installer warns you if you
+  get this wrong.
+
+### 2. Get the code
+
+The repo is private, so the clone needs credentials. Easiest is the GitHub CLI:
+
+```bash
+winget install --id GitHub.cli
+```
+
+```bash
+gh auth login
+```
+
+```bash
+gh repo clone RobertGonzales1/voipms-sms-toolkit C:\voipms
+```
+
+No GitHub on the VM? Copying the folder over works just as well — it is seven
+files and nothing is compiled. Do **not** copy `sip_config.json` across if you can
+avoid it; create it fresh on the VM so the password is not sitting in a second
+place.
+
+### 3. Configure
+
+`sip_config.json` is deliberately not in the repo, so create it on the VM:
+
+```bash
+cd C:\voipms && copy sip_config.example.json sip_config.json
+```
+
+Fill it in as in Setup above. **There is no OneDrive on the VM**, so the
+cloud-sync objection to putting passwords in the file does not apply — a local
+`sip_config.json` on a machine only you reach is a reasonable choice, and it is
+the simpler option if you plan to run at boot.
+
+If you would still rather use environment variables, mind the scope:
+
+| Task mode | Runs as | Variable scope needed |
+| --- | --- | --- |
+| default (logon) | you | `User` or `Machine` |
+| `-AtStartup` | SYSTEM | **`Machine` only** |
+
+```bash
+powershell -Command "[Environment]::SetEnvironmentVariable('VOIPMS_SIP_PASSWORD_MAIN','your-sip-password','Machine')"
+```
+
+Setting a Machine-scoped variable needs an elevated prompt.
+
+### 4. Verify, then install as a boot service
+
+```bash
+cd C:\voipms && python sip_keepalive.py --check
+```
+
+Once every line reads `[ok]`, from an **elevated** PowerShell:
+
+```bash
+cd C:\voipms && powershell -ExecutionPolicy Bypass -File .\install-keepalive-task.ps1 -AtStartup
+```
+
+`-AtStartup` registers the task to run as SYSTEM at boot, so it comes back after a
+reboot with nobody logged in. Without that flag it runs at logon instead, which is
+fine for a VM you keep signed into.
+
+```bash
+powershell -Command "Start-ScheduledTask -TaskName 'VoIPms SIP Keepalive'"
+```
+
+```bash
+cd C:\voipms && python sip_keepalive.py --status
+```
+
+### 5. Confirm it survives a reboot
+
+Worth doing once — it is the whole point of `-AtStartup`. Reboot the VM, wait a
+minute, then run `--status` again. Registrations should be live with nobody logged
+in.
 
 ---
 
