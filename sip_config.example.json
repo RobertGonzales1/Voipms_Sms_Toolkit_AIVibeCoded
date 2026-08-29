@@ -3,7 +3,7 @@
 
   "_password_note": "PREFERRED: leave 'password' out entirely and set an environment variable instead - VOIPMS_SIP_PASSWORD_<LABEL>, uppercased with non-alphanumerics as underscores. So label 'main-line' reads VOIPMS_SIP_PASSWORD_MAIN_LINE. This folder is typically cloud-synced, and a SIP password permits outbound calling at your expense.",
 
-  "_did_note": "'did' is display-only - it labels the row in the dashboard. Use 'dids': [..] if one subaccount receives for several numbers. Run 'python voipms_watch.py map' to discover which subaccount each number uses.",
+  "_did_note": "'did' is display-only - it labels the row in the dashboard. Use 'dids': [..] if one subaccount receives for several numbers.",
 
   "defaults": {
     "server": "chicago.voip.ms",
