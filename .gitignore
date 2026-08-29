@@ -1,0 +1,10 @@
+config.json
+watch.log
+baseline.json
+__pycache__/
+*.pyc
+watch-runs.log
+sip_config.json
+sip_status.json
+sip_keepalive.log
+sip_messages.log

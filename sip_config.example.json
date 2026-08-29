@@ -1,0 +1,29 @@
+{
+  "_comment": "Copy to sip_config.json and fill in. These are SUBACCOUNT SIP passwords, NOT your API password and NOT your portal password. Find them under Sub Accounts > Manage Sub Accounts > edit (pencil icon).",
+
+  "defaults": {
+    "server": "chicago.voip.ms",
+    "sip_port": 5060,
+    "expires": 300,
+    "nat_keepalive": 30,
+    "invite_response": "480 Temporarily Unavailable"
+  },
+
+  "_did_note": "'did' is display-only - it labels the row in the dashboard. Use 'dids': [..] if one subaccount receives for several numbers. Run 'python voipms_watch.py map' to discover which subaccount each number uses.",
+
+  "accounts": [
+    {
+      "label": "main-line",
+      "did": "5551234567",
+      "account": "123456_main",
+      "password": "SUBACCOUNT_SIP_PASSWORD"
+    },
+    {
+      "label": "business",
+      "dids": ["5559876543", "5552223333"],
+      "account": "123456_biz",
+      "password": "SUBACCOUNT_SIP_PASSWORD",
+      "server": "toronto.voip.ms"
+    }
+  ]
+}
