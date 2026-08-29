@@ -1,10 +1,11 @@
 # VoIP.ms SMS Toolkit
 
-Two programs that work together:
+Three programs that work together:
 
 1. **`sip_keepalive.py`** — holds your subaccounts continuously SIP-registered so
    VoIP.ms accepts inbound SMS. This is the one that fixes the rejections.
-2. **`voipms_watch.py`** — watches everything else that can silently break
+2. **`dashboard.ps1`** — live, colour-coded registration status for every number.
+3. **`voipms_watch.py`** — watches everything else that can silently break
    delivery (balance, per-DID SMS settings, registration status).
 
 Stdlib Python only. No `pip install`.
@@ -63,6 +64,10 @@ For each subaccount you need:
 - **`server`** — your POP, e.g. `chicago.voip.ms`. Use the one closest to you;
   it is shown on each subaccount's page.
 
+- **`did`** — the phone number this subaccount receives for. Display only: it
+  labels the row in the dashboard. Use `"dids": ["...", "..."]` if one subaccount
+  covers several numbers.
+
 ```json
 {
   "defaults": {
@@ -71,11 +76,22 @@ For each subaccount you need:
     "nat_keepalive": 30
   },
   "accounts": [
-    { "label": "main",     "account": "123456_main", "password": "..." },
-    { "label": "business", "account": "123456_biz",  "password": "..." }
+    { "label": "main",     "did": "5551234567", "account": "123456_main", "password": "..." },
+    { "label": "business", "did": "5559876543", "account": "123456_biz",  "password": "..." }
   ]
 }
 ```
+
+### Finding which subaccount each number uses
+
+If you are not sure of the pairing, this prints every DID with the subaccount
+fields attached to it, plus a ready-to-paste `accounts` skeleton:
+
+```bash
+python voipms_watch.py map
+```
+
+It needs the API credentials from Part 2 below.
 
 ### Verify one account before committing
 
@@ -115,7 +131,40 @@ task to run as SYSTEM or with stored credentials, since no one is signed in yet.
 powershell -Command "Start-ScheduledTask -TaskName 'VoIPms SIP Keepalive'"
 ```
 
-Check on it any time:
+### The dashboard
+
+A live view of every number and whether it is currently registered:
+
+```bash
+powershell -ExecutionPolicy Bypass -File ".\dashboard.ps1"
+```
+
+```
+  VoIP.ms SIP Registration                           2026-08-29 14:22:45
+  ============================================================================
+  daemon: RUNNING  (pid 24188, updated 3s ago)
+
+  PHONE NUMBER      LABEL         SUBACCOUNT        STATUS          RENEWS  SMS
+  ----------------------------------------------------------------------------
+  (555) 123-4567    main          123456_main       REGISTERED      247s    3
+  (555) 987-6543    business      123456_biz        REGISTERED      190s    0
+  (555) 222-3333
+  (555) 444-5555    alerts        123456_alerts     NOT REGISTERED  --      0
+      authentication rejected (403) - check the subaccount password
+  ============================================================================
+  3 of 4 registered                                          Ctrl+C to exit
+```
+
+Green means registered, red means not, and a failing account prints its reason
+underneath. The top line tracks the daemon itself — if it stops writing status,
+that flips to a red **STOPPED**, which is what you want to see when registrations
+are quietly expiring.
+
+It refreshes every 2 seconds; use `-RefreshSeconds 5` to slow it down or `-Once`
+for a single snapshot. It reads `sip_status.json`, so it works whether the daemon
+is in a console or running hidden as a Scheduled Task.
+
+For a plain one-shot check without PowerShell:
 
 ```bash
 python sip_keepalive.py --status
@@ -174,6 +223,7 @@ python voipms_watch.py baseline
 | Command | |
 | --- | --- |
 | `test` | Probes credentials and which API methods your account exposes |
+| `map` | Shows which subaccount each DID uses, with a `sip_config.json` skeleton |
 | `baseline` | Snapshots per-DID SMS settings to `baseline.json` |
 | `check` | Balance, route sanity, drift vs baseline, registration, keepalive health |
 | `repair` | Re-applies the baseline to drifted DIDs, then re-reads to verify it stuck |
@@ -219,3 +269,11 @@ python test_logic.py
 
 Both run fully offline. `test_sip.py` stands up a fake SIP registrar on localhost
 and exercises the real digest handshake, including the RFC 2617 reference vector.
+
+## Repository
+
+Private: <https://github.com/RobertGonzales1/voipms-sms-toolkit>
+
+`.gitignore` excludes `config.json`, `sip_config.json`, `sip_status.json`,
+`baseline.json` and all logs — so passwords and SMS content stay local. Keep it
+that way if you add files: `sip_messages.log` contains message bodies.
