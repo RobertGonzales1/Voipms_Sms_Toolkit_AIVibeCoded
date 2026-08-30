@@ -642,7 +642,28 @@ def load_config() -> dict:
             "  subaccount names, SIP passwords and POP server."
         )
     with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
-        cfg = json.load(fh)
+        raw = fh.read()
+
+    try:
+        cfg = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        # The bare message ("Expecting ',' delimiter: line 17 column 7") does not
+        # say which file, and hand-edited JSON is the most common way to land
+        # here. Show the offending line with a caret under the column.
+        lines = raw.splitlines()
+        pointer = ""
+        if 1 <= exc.lineno <= len(lines):
+            offending = lines[exc.lineno - 1]
+            pointer = f"\n\n    {offending}\n    {' ' * max(0, exc.colno - 1)}^"
+        raise RuntimeError(
+            f"{CONFIG_PATH} is not valid JSON.\n"
+            f"  {exc.msg} at line {exc.lineno}, column {exc.colno}.{pointer}\n\n"
+            "  Usual causes: a trailing comma before a } or ], a missing comma\n"
+            "  between entries, or a smart quote pasted in place of a plain \"."
+        ) from exc
+
+    if not isinstance(cfg, dict):
+        raise RuntimeError(f"{CONFIG_PATH} must contain a JSON object")
     if not cfg.get("accounts"):
         raise RuntimeError("sip_config.json has no 'accounts' entries")
 

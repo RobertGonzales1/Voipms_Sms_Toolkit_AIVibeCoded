@@ -252,7 +252,11 @@ if (Test-ExistingDaemon) {
 
     if ($Proc.HasExited) {
         Write-Host ''
-        Write-Host "  Daemon exited immediately (code $($Proc.ExitCode)):" -ForegroundColor Red
+        # Start-Process -PassThru does not always populate ExitCode until the
+        # process has been waited on, even once it has exited.
+        try { $Proc.WaitForExit(2000) | Out-Null } catch { }
+        $code = if ($null -ne $Proc.ExitCode) { $Proc.ExitCode } else { 'unknown' }
+        Write-Host "  Daemon exited immediately (exit $code):" -ForegroundColor Red
         Show-Tail $ErrLog
         Show-Tail $OutLog
         Write-Host ''
