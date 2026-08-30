@@ -166,7 +166,7 @@ gh auth login
 ```
 
 ```bash
-gh repo clone RobertGonzales1/voipms-sms-toolkit C:\voipms
+gh repo clone RobertGonzales1/Voipms_Sms_Toolkit_AIVibeCoded C:\voipms
 ```
 
 No GitHub on the VM? Copying the folder over works just as well — it is seven
@@ -314,7 +314,7 @@ python -m unittest test_sip.ExpiryTests -v
 
 ## Repository
 
-Private: <https://github.com/RobertGonzales1/voipms-sms-toolkit>
+Private: <https://github.com/RobertGonzales1/Voipms_Sms_Toolkit_AIVibeCoded>
 
 `.gitignore` excludes `sip_config.json`, `sip_status.json` and all logs, so
 passwords and SMS metadata stay local.
